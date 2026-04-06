@@ -46,9 +46,19 @@
     .empty { color: var(--muted); font-size: 0.85rem; text-align: center; padding: 20px 0; }
     .hidden { display: none !important; }
     #debug-log { font-size: 0.75rem; color: var(--muted); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; max-height: 120px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+    #loading-overlay { position: fixed; inset: 0; background: rgba(15,15,19,0.85); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; z-index: 999; }
+    #loading-overlay p { color: var(--muted); font-size: 0.85rem; }
+    .spinner { width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
+
+<!-- Loading overlay ขณะโหลด mediasoup-client -->
+<div id="loading-overlay">
+  <div class="spinner"></div>
+  <p>Loading mediasoup-client…</p>
+</div>
 
 <header>
   <h1>🎙️ ProximityVoice</h1>
@@ -61,7 +71,7 @@
   <input type="text" id="server-url" placeholder="wss://your-app.onrender.com" />
   <label>Your Minecraft Gamertag</label>
   <input type="text" id="gamertag" placeholder="Steve" />
-  <button class="btn btn-primary" id="btn-join">🎮 Join Voice</button>
+  <button class="btn btn-primary" id="btn-join" disabled>🎮 Join Voice</button>
 </div>
 
 <div class="card hidden" id="voice-card">
@@ -88,318 +98,414 @@
   <div id="debug-log"></div>
 </div>
 
-<!-- mediasoup-client bundled (ใช้ของเดิมจาก CDN) -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/mediasoup-client/3.6.55/mediasoup-client.min.js" crossorigin></script>
-<script>
-// ถ้า CDN โหลดไม่ได้ ให้ fallback ไปที่ window.mediasoupClient ที่อาจ inject มาแล้ว
-</script>
+<!--
+  ใช้ <script type="module"> เพราะ mediasoup-client v3+ ไม่มี UMD bundle
+  ใช้ esm.sh ซึ่ง transpile CommonJS → ESM ให้อัตโนมัติ
+  ref: https://mediasoup.org/documentation/v3/mediasoup-client/installation/
+-->
+<script type="module">
+// ──────────────────────────────────────────────────────────────
+// Import mediasoup-client จาก esm.sh (รองรับ CommonJS → ESM)
+// version 3.18.7 = latest ณ เมษายน 2026
+// ──────────────────────────────────────────────────────────────
+import * as mediasoupClient from 'https://esm.sh/mediasoup-client@3.18.7';
 
-<script>
-(() => {
-  // ─── Debug log ───────────────────────────────────────
-  const $debugCard = document.getElementById('debug-card');
-  const $debugLog  = document.getElementById('debug-log');
-  function dbg(...args) {
-    const line = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
-    console.log('[PV]', line);
-    $debugLog.textContent += line + '\n';
-    $debugLog.scrollTop = $debugLog.scrollHeight;
+// ─── ซ่อน loading overlay เมื่อ import สำเร็จ ────────────────
+const $loadingOverlay = document.getElementById('loading-overlay');
+$loadingOverlay.style.display = 'none';
+document.getElementById('btn-join').disabled = false;
+
+// ─── Debug log ───────────────────────────────────────────────
+const $debugCard = document.getElementById('debug-card');
+const $debugLog  = document.getElementById('debug-log');
+function dbg(...args) {
+  const line = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+  console.log('[PV]', line);
+  $debugCard.classList.remove('hidden');
+  $debugLog.textContent += line + '\n';
+  $debugLog.scrollTop = $debugLog.scrollHeight;
+}
+
+dbg('mediasoup-client loaded, version:', mediasoupClient.version);
+
+// ─── State ───────────────────────────────────────────────────
+let ws = null, device = null, sendTransport = null, recvTransport = null;
+let producer = null, localStream = null, myGamertag = '', isMuted = false;
+const consumers = new Map(); // tag → { consumer, gainNode }
+let audioCtx = null;
+
+// ─── UI refs ─────────────────────────────────────────────────
+const $serverUrl   = document.getElementById('server-url');
+const $gamertag    = document.getElementById('gamertag');
+const $btnJoin     = document.getElementById('btn-join');
+const $connectCard = document.getElementById('connect-card');
+const $voiceCard   = document.getElementById('voice-card');
+const $peersCard   = document.getElementById('peers-card');
+const $statusDot   = document.getElementById('status-dot');
+const $statusText  = document.getElementById('status-text');
+const $btnMute     = document.getElementById('btn-mute');
+const $btnLeave    = document.getElementById('btn-leave');
+const $peersList   = document.getElementById('peers-list');
+const $noPeers     = document.getElementById('no-peers');
+
+function setStatus(state, text) {
+  $statusDot.className = 'dot ' + state;
+  $statusText.textContent = text;
+  dbg('Status:', state, text);
+}
+
+// ─── AudioContext ─────────────────────────────────────────────
+function getAudioCtx() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    dbg('AudioContext created, state:', audioCtx.state);
+  }
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume().then(() => dbg('AudioContext resumed'));
+  }
+  return audioCtx;
+}
+
+// ─── Peer list UI ─────────────────────────────────────────────
+function renderPeer(tag, volume = 0) {
+  let li = document.getElementById('peer-' + tag);
+  if (!li) {
+    li = document.createElement('li');
+    li.id = 'peer-' + tag;
+    li.innerHTML = `
+      <div class="peer-avatar">${tag[0].toUpperCase()}</div>
+      <div class="peer-info">
+        <div class="peer-name">${tag}</div>
+        <div class="peer-vol" id="vol-text-${tag}">Connecting...</div>
+      </div>
+      <div class="peer-bar-wrap">
+        <div class="peer-bar" id="vol-bar-${tag}"></div>
+      </div>`;
+    $peersList.appendChild(li);
+  }
+  updatePeerVolume(tag, volume);
+  $noPeers.classList.add('hidden');
+}
+
+function updatePeerVolume(tag, volume) {
+  const bar = document.getElementById('vol-bar-' + tag);
+  const txt = document.getElementById('vol-text-' + tag);
+  if (!bar || !txt) return;
+  bar.style.width = Math.round(volume * 100) + '%';
+  txt.textContent = volume > 0 ? `Volume: ${Math.round(volume * 100)}%` : 'Out of range';
+}
+
+function removePeer(tag) {
+  const el = document.getElementById('peer-' + tag);
+  if (el) el.remove();
+  if ($peersList.querySelectorAll('li:not(.empty)').length === 0) {
+    $noPeers.classList.remove('hidden');
+  }
+}
+
+// ─── Connect ──────────────────────────────────────────────────
+async function connect() {
+  const rawUrl = $serverUrl.value.trim();
+  myGamertag = $gamertag.value.trim();
+  if (!rawUrl || !myGamertag) { alert('Please fill in Server URL and Gamertag'); return; }
+
+  // รองรับทั้ง http/https → ws/wss
+  const wsUrl = rawUrl.replace(/^https?:\/\//, (m) => m === 'https://' ? 'wss://' : 'ws://');
+  setStatus('connecting', 'Connecting…');
+  $btnJoin.disabled = true;
+
+  // สร้าง AudioContext ภายใน user gesture
+  getAudioCtx();
+
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    dbg('Mic OK, tracks:', localStream.getAudioTracks().length);
+  } catch (err) {
+    alert('Microphone access denied: ' + err.message);
+    $btnJoin.disabled = false;
+    setStatus('', 'Mic denied');
+    return;
   }
 
-  // ─── State ───────────────────────────────────────────
-  let ws = null, device = null, sendTransport = null, recvTransport = null;
-  let producer = null, localStream = null, myGamertag = '', isMuted = false;
-  const consumers = new Map(); // tag → { consumer, gainNode }
-  let audioCtx = null;
+  ws = new WebSocket(wsUrl);
 
-  // ─── UI refs ─────────────────────────────────────────
-  const $serverUrl   = document.getElementById('server-url');
-  const $gamertag    = document.getElementById('gamertag');
-  const $btnJoin     = document.getElementById('btn-join');
-  const $connectCard = document.getElementById('connect-card');
-  const $voiceCard   = document.getElementById('voice-card');
-  const $peersCard   = document.getElementById('peers-card');
-  const $statusDot   = document.getElementById('status-dot');
-  const $statusText  = document.getElementById('status-text');
-  const $btnMute     = document.getElementById('btn-mute');
-  const $btnLeave    = document.getElementById('btn-leave');
-  const $peersList   = document.getElementById('peers-list');
-  const $noPeers     = document.getElementById('no-peers');
+  ws.onopen = () => {
+    dbg('WS open → sending join');
+    setStatus('connecting', 'Requesting RTP caps…');
+    send({ type: 'join', gamertag: myGamertag });
+  };
 
-  function setStatus(state, text) {
-    $statusDot.className = 'dot ' + state;
-    $statusText.textContent = text;
-    dbg('Status:', state, text);
-  }
+  ws.onmessage = async (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch { return; }
+    dbg('← msg:', msg.type, JSON.stringify(msg).slice(0, 100));
+    await handleMsg(msg);
+  };
 
-  // ─── AudioContext (สร้างตอน join เพื่อหลีกเลี่ยง autoplay policy) ──
-  function getAudioCtx() {
-    if (!audioCtx) {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      dbg('AudioContext created, state:', audioCtx.state);
-    }
-    if (audioCtx.state === 'suspended') {
-      audioCtx.resume().then(() => dbg('AudioContext resumed'));
-    }
-    return audioCtx;
-  }
+  ws.onclose = (e) => {
+    dbg('WS closed, code:', e.code, 'reason:', e.reason);
+    setStatus('', 'Disconnected');
+    cleanup();
+    showConnect();
+  };
 
-  // ─── Peer list UI ────────────────────────────────────
-  function renderPeer(tag, volume = 0) {
-    let li = document.getElementById('peer-' + tag);
-    if (!li) {
-      li = document.createElement('li');
-      li.id = 'peer-' + tag;
-      li.innerHTML = `
-        <div class="peer-avatar">${tag[0].toUpperCase()}</div>
-        <div class="peer-info">
-          <div class="peer-name">${tag}</div>
-          <div class="peer-vol" id="vol-text-${tag}">Connecting...</div>
-        </div>
-        <div class="peer-bar-wrap">
-          <div class="peer-bar" id="vol-bar-${tag}"></div>
-        </div>`;
-      $peersList.appendChild(li);
-    }
-    updatePeerVolume(tag, volume);
-    $noPeers.classList.add('hidden');
-  }
+  ws.onerror = (e) => {
+    dbg('WS error');
+    setStatus('', 'Connection error');
+  };
+}
 
-  function updatePeerVolume(tag, volume) {
-    const bar = document.getElementById('vol-bar-' + tag);
-    const txt = document.getElementById('vol-text-' + tag);
-    if (!bar || !txt) return;
-    bar.style.width = Math.round(volume * 100) + '%';
-    txt.textContent = volume > 0 ? `Volume: ${Math.round(volume * 100)}%` : 'Out of range';
-  }
+// ─── Message handler ──────────────────────────────────────────
+async function handleMsg(msg) {
+  switch (msg.type) {
 
-  function removePeer(tag) {
-    const el = document.getElementById('peer-' + tag);
-    if (el) el.remove();
-    if ($peersList.querySelectorAll('li:not(.empty)').length === 0) {
-      $noPeers.classList.remove('hidden');
-    }
-  }
+    case 'joined': {
+      dbg('joined, peers:', msg.peers);
+      // ใช้ mediasoupClient.Device จาก ESM import (ไม่ใช่ window.mediasoupClient)
+      device = new mediasoupClient.Device();
+      await device.load({ routerRtpCapabilities: msg.rtpCapabilities });
+      dbg('Device loaded, canProduceAudio:', device.canProduce('audio'));
 
-  // ─── Connect ─────────────────────────────────────────
-  async function connect() {
-    const rawUrl = $serverUrl.value.trim();
-    myGamertag = $gamertag.value.trim();
-    if (!rawUrl || !myGamertag) { alert('Please fill in Server URL and Gamertag'); return; }
+      send({ type: 'create-transport', direction: 'send' });
+      send({ type: 'create-transport', direction: 'recv' });
+      setStatus('connecting', 'Setting up transports…');
 
-    const wsUrl = rawUrl.replace(/^http/, 'ws');
-    setStatus('connecting', 'Connecting…');
-    $btnJoin.disabled = true;
-    $debugCard.classList.remove('hidden');
-
-    // สร้าง AudioContext ทันทีที่ user กด (อยู่ใน user gesture)
-    getAudioCtx();
-
-    try {
-      localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      dbg('Mic stream OK, tracks:', localStream.getAudioTracks().length);
-    } catch (err) {
-      alert('Microphone access denied: ' + err.message);
-      $btnJoin.disabled = false;
-      setStatus('', 'Mic denied');
-      return;
-    }
-
-    ws = new WebSocket(wsUrl);
-    ws.onopen = () => {
-      dbg('WS open → sending join');
-      setStatus('connecting', 'Requesting RTP caps…');
-      send({ type: 'join', gamertag: myGamertag });
-    };
-    ws.onmessage = async (e) => {
-      const msg = JSON.parse(e.data);
-      dbg('← msg:', msg.type, JSON.stringify(msg).slice(0, 80));
-      await handleMsg(msg);
-    };
-    ws.onclose = () => { setStatus('', 'Disconnected'); cleanup(); showConnect(); };
-    ws.onerror = (e) => { dbg('WS error', e); setStatus('', 'Connection error'); };
-  }
-
-  // ─── Message handler ─────────────────────────────────
-  async function handleMsg(msg) {
-    const mc = window.mediasoupClient;
-    if (!mc) { dbg('ERROR: mediasoupClient not loaded!'); return; }
-
-    switch (msg.type) {
-
-      case 'joined': {
-        device = new mc.Device();
-        await device.load({ routerRtpCapabilities: msg.rtpCapabilities });
-        dbg('Device loaded, canProduceAudio:', device.canProduce('audio'));
-
-        send({ type: 'create-transport', direction: 'send' });
-        send({ type: 'create-transport', direction: 'recv' });
-        setStatus('connecting', 'Setting up transports…');
-
-        for (const tag of (msg.peers || [])) {
-          renderPeer(tag, 0);
-        }
-        break;
+      for (const tag of (msg.peers || [])) {
+        renderPeer(tag, 0);
       }
+      break;
+    }
 
-      case 'transport-created': {
-        const { direction, params } = msg;
-        if (direction === 'send') {
-          sendTransport = device.createSendTransport(params);
-          sendTransport.on('connect', ({ dtlsParameters }, cb) => {
-            send({ type: 'connect-transport', direction: 'send', dtlsParameters });
-            cb();
-          });
-          sendTransport.on('produce', async ({ kind, rtpParameters }, cb) => {
-            send({ type: 'produce', rtpParameters });
-            const onMsg = (e) => {
-              const m = JSON.parse(e.data);
-              if (m.type === 'produced') {
-                ws.removeEventListener('message', onMsg);
-                cb({ id: m.producerId });
-              }
-            };
-            ws.addEventListener('message', onMsg);
-          });
+    case 'transport-created': {
+      const { direction, params } = msg;
+      dbg('transport-created:', direction, 'id:', params.id);
 
-          const track = localStream.getAudioTracks()[0];
-          dbg('Producing track:', track.label);
+      if (direction === 'send') {
+        sendTransport = device.createSendTransport(params);
+
+        sendTransport.on('connect', ({ dtlsParameters }, cb, errback) => {
+          send({ type: 'connect-transport', direction: 'send', dtlsParameters });
+          // รอ server ตอบกลับ transport-connected
+          const onMsg = (e) => {
+            const m = JSON.parse(e.data);
+            if (m.type === 'transport-connected' && m.direction === 'send') {
+              ws.removeEventListener('message', onMsg);
+              cb();
+            } else if (m.type === 'error') {
+              ws.removeEventListener('message', onMsg);
+              errback(new Error(m.message));
+            }
+          };
+          ws.addEventListener('message', onMsg);
+        });
+
+        sendTransport.on('produce', async ({ kind, rtpParameters }, cb, errback) => {
+          send({ type: 'produce', rtpParameters });
+          const onMsg = (e) => {
+            const m = JSON.parse(e.data);
+            if (m.type === 'produced') {
+              ws.removeEventListener('message', onMsg);
+              cb({ id: m.producerId });
+            } else if (m.type === 'error') {
+              ws.removeEventListener('message', onMsg);
+              errback(new Error(m.message));
+            }
+          };
+          ws.addEventListener('message', onMsg);
+        });
+
+        const track = localStream.getAudioTracks()[0];
+        dbg('Producing track:', track.label);
+        try {
           producer = await sendTransport.produce({ track });
-          dbg('Producer created:', producer.id);
-
-        } else {
-          recvTransport = device.createRecvTransport(params);
-          recvTransport.on('connect', ({ dtlsParameters }, cb) => {
-            send({ type: 'connect-transport', direction: 'recv', dtlsParameters });
-            cb();
-          });
-          setStatus('connected', `Connected as ${myGamertag}`);
-          showVoice();
+          dbg('Producer OK, id:', producer.id);
+        } catch (err) {
+          dbg('produce error:', err.message);
         }
-        break;
-      }
 
-      case 'new-producer': {
-        const { gamertag } = msg;
-        dbg('new-producer from:', gamertag);
-        renderPeer(gamertag, 0);
+      } else {
+        // recv transport
+        recvTransport = device.createRecvTransport(params);
+
+        recvTransport.on('connect', ({ dtlsParameters }, cb, errback) => {
+          send({ type: 'connect-transport', direction: 'recv', dtlsParameters });
+          const onMsg = (e) => {
+            const m = JSON.parse(e.data);
+            if (m.type === 'transport-connected' && m.direction === 'recv') {
+              ws.removeEventListener('message', onMsg);
+              cb();
+            } else if (m.type === 'error') {
+              ws.removeEventListener('message', onMsg);
+              errback(new Error(m.message));
+            }
+          };
+          ws.addEventListener('message', onMsg);
+        });
+
+        setStatus('connected', `Connected as ${myGamertag}`);
+        showVoice();
+      }
+      break;
+    }
+
+    case 'new-producer': {
+      const { gamertag } = msg;
+      dbg('new-producer from:', gamertag);
+      renderPeer(gamertag, 0);
+      // รอ recv transport พร้อมก่อน consume
+      if (recvTransport) {
         await consumePeer(gamertag);
-        break;
+      } else {
+        dbg('recvTransport not ready yet, will consume later');
+        // retry เมื่อ transport พร้อม
+        const wait = setInterval(() => {
+          if (recvTransport) {
+            clearInterval(wait);
+            consumePeer(gamertag);
+          }
+        }, 200);
       }
+      break;
+    }
 
-      case 'consumed': {
-        const { speakerGamertag, params } = msg;
-        dbg('consumed:', speakerGamertag, 'consumer id:', params.id);
+    case 'consumed': {
+      const { speakerGamertag, params } = msg;
+      dbg('consumed:', speakerGamertag, 'consumer id:', params.id);
 
+      try {
         const ctx = getAudioCtx();
         const consumer = await recvTransport.consume(params);
         const mediaStream = new MediaStream([consumer.track]);
 
         const source = ctx.createMediaStreamSource(mediaStream);
         const gainNode = ctx.createGain();
-        // ตั้ง volume เริ่มต้นเป็น 1.0 (ได้ยินเสียงก่อน รอ proximity update)
-        gainNode.gain.value = 1.0;
+        gainNode.gain.value = 1.0; // เต็มก่อน รอ proximity update
         source.connect(gainNode);
         gainNode.connect(ctx.destination);
 
         consumers.set(speakerGamertag, { consumer, gainNode });
-        dbg('Audio pipeline connected for:', speakerGamertag, '| audioCtx state:', ctx.state);
+        dbg('Audio pipeline ready for:', speakerGamertag, '| audioCtx:', ctx.state);
 
-        // resume audioCtx อีกครั้งเผื่อถูก suspend
         if (ctx.state === 'suspended') {
           await ctx.resume();
           dbg('AudioContext resumed after consume');
         }
-        break;
+      } catch (err) {
+        dbg('consume error:', speakerGamertag, err.message);
       }
-
-      case 'proximity-update': {
-        const { volumes } = msg;
-        dbg('proximity-update:', JSON.stringify(volumes));
-
-        for (const [tag, vol] of Object.entries(volumes)) {
-          const entry = consumers.get(tag);
-          if (entry) {
-            entry.gainNode.gain.setTargetAtTime(vol, audioCtx.currentTime, 0.05);
-          }
-          renderPeer(tag, vol);
-        }
-
-        // Players ที่ไม่อยู่ใน update = out of range → volume 0
-        for (const [tag, entry] of consumers.entries()) {
-          if (!(tag in volumes)) {
-            entry.gainNode.gain.setTargetAtTime(0, audioCtx.currentTime, 0.05);
-            updatePeerVolume(tag, 0);
-          }
-        }
-        break;
-      }
-
-      case 'peer-left': {
-        const { gamertag } = msg;
-        const entry = consumers.get(gamertag);
-        if (entry) { entry.consumer.close(); consumers.delete(gamertag); }
-        removePeer(gamertag);
-        break;
-      }
-
-      case 'error':
-        dbg('Server error:', msg.message);
-        break;
+      break;
     }
-  }
 
-  async function consumePeer(speakerGamertag) {
-    if (!device || !recvTransport) { dbg('consumePeer: not ready'); return; }
-    send({ type: 'consume', speakerGamertag, rtpCapabilities: device.rtpCapabilities });
-  }
+    case 'proximity-update': {
+      const { volumes } = msg;
+      dbg('proximity-update:', JSON.stringify(volumes));
 
-  function send(data) {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
-  }
+      for (const [tag, vol] of Object.entries(volumes)) {
+        const entry = consumers.get(tag);
+        if (entry) {
+          entry.gainNode.gain.setTargetAtTime(vol, audioCtx.currentTime, 0.05);
+        }
+        renderPeer(tag, vol);
+      }
 
-  function toggleMute() {
-    isMuted = !isMuted;
-    if (producer) { isMuted ? producer.pause() : producer.resume(); }
-    $btnMute.textContent = isMuted ? '🔇 Unmute' : '🎤 Mute';
-  }
+      // ใครไม่อยู่ใน update = out of range
+      for (const [tag, entry] of consumers.entries()) {
+        if (!(tag in volumes)) {
+          entry.gainNode.gain.setTargetAtTime(0, audioCtx.currentTime, 0.05);
+          updatePeerVolume(tag, 0);
+        }
+      }
+      break;
+    }
 
-  function cleanup() {
-    if (producer) { producer.close(); producer = null; }
-    if (sendTransport) { sendTransport.close(); sendTransport = null; }
-    if (recvTransport) { recvTransport.close(); recvTransport = null; }
-    for (const entry of consumers.values()) entry.consumer.close();
-    consumers.clear();
-    if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
-    $peersList.querySelectorAll('li:not(.empty)').forEach(el => el.remove());
-    $noPeers.classList.remove('hidden');
-  }
+    case 'peer-left': {
+      const { gamertag } = msg;
+      dbg('peer-left:', gamertag);
+      const entry = consumers.get(gamertag);
+      if (entry) { entry.consumer.close(); consumers.delete(gamertag); }
+      removePeer(gamertag);
+      break;
+    }
 
-  function leave() {
-    if (ws) { ws.close(); ws = null; }
-    cleanup();
-    showConnect();
-  }
+    case 'transport-connected':
+      // handled inline in connect listeners
+      break;
 
-  function showVoice() {
-    $connectCard.classList.add('hidden');
-    $voiceCard.classList.remove('hidden');
-    $peersCard.classList.remove('hidden');
-  }
+    case 'produced':
+      // handled inline in produce listener
+      break;
 
-  function showConnect() {
-    $connectCard.classList.remove('hidden');
-    $voiceCard.classList.add('hidden');
-    $peersCard.classList.add('hidden');
-    $btnJoin.disabled = false;
-    isMuted = false;
-    $btnMute.textContent = '🎤 Mute';
-  }
+    case 'error':
+      dbg('Server error:', msg.message);
+      break;
 
-  $btnJoin.addEventListener('click', connect);
-  $btnMute.addEventListener('click', toggleMute);
-  $btnLeave.addEventListener('click', leave);
-})();
+    default:
+      dbg('Unknown msg:', msg.type);
+  }
+}
+
+async function consumePeer(speakerGamertag) {
+  if (!device || !recvTransport) {
+    dbg('consumePeer: not ready yet for', speakerGamertag);
+    return;
+  }
+  dbg('Requesting consume for:', speakerGamertag);
+  send({
+    type: 'consume',
+    speakerGamertag,
+    rtpCapabilities: device.rtpCapabilities
+  });
+}
+
+function send(data) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(data));
+  }
+}
+
+function toggleMute() {
+  isMuted = !isMuted;
+  if (producer) { isMuted ? producer.pause() : producer.resume(); }
+  $btnMute.textContent = isMuted ? '🔇 Unmute' : '🎤 Mute';
+  dbg('Mute toggled:', isMuted);
+}
+
+function cleanup() {
+  if (producer) { try { producer.close(); } catch {} producer = null; }
+  if (sendTransport) { try { sendTransport.close(); } catch {} sendTransport = null; }
+  if (recvTransport) { try { recvTransport.close(); } catch {} recvTransport = null; }
+  for (const entry of consumers.values()) { try { entry.consumer.close(); } catch {} }
+  consumers.clear();
+  if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+  device = null;
+  $peersList.querySelectorAll('li:not(.empty)').forEach(el => el.remove());
+  $noPeers.classList.remove('hidden');
+}
+
+function leave() {
+  if (ws) { ws.close(); ws = null; }
+  cleanup();
+  showConnect();
+}
+
+function showVoice() {
+  $connectCard.classList.add('hidden');
+  $voiceCard.classList.remove('hidden');
+  $peersCard.classList.remove('hidden');
+}
+
+function showConnect() {
+  $connectCard.classList.remove('hidden');
+  $voiceCard.classList.add('hidden');
+  $peersCard.classList.add('hidden');
+  $btnJoin.disabled = false;
+  isMuted = false;
+  $btnMute.textContent = '🎤 Mute';
+}
+
+$btnJoin.addEventListener('click', connect);
+$btnMute.addEventListener('click', toggleMute);
+$btnLeave.addEventListener('click', leave);
 </script>
 </body>
 </html>
