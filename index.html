@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ProximityVoice</title>
+  <style>
+    :root {
+      --bg: #0f0f13;
+      --surface: #1a1a24;
+      --border: #2a2a3a;
+      --accent: #5b8aff;
+      --accent2: #a855f7;
+      --green: #22c55e;
+      --red: #ef4444;
+      --yellow: #eab308;
+      --text: #e2e8f0;
+      --muted: #64748b;
+      --radius: 12px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px 16px;
+    }
+
+    /* ── Header ── */
+    header {
+      text-align: center;
+      margin-bottom: 28px;
+    }
+    header h1 {
+      font-size: 1.8rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    header p { color: var(--muted); font-size: 0.85rem; margin-top: 4px; }
+
+    /* ── Card ── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      width: 100%;
+      max-width: 480px;
+      margin-bottom: 16px;
+    }
+    .card h2 {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 16px;
+    }
+
+    /* ── Form ── */
+    label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 6px; }
+    input[type="text"] {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 10px 14px;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border 0.2s;
+      margin-bottom: 14px;
+    }
+    input[type="text"]:focus { border-color: var(--accent); }
+
+    /* ── Buttons ── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 20px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+    .btn:active { transform: scale(0.97); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); color: #fff; width: 100%; justify-content: center; }
+    .btn-danger  { background: var(--red);    color: #fff; }
+    .btn-mute    { background: var(--yellow); color: #000; }
+    .btn-sm      { padding: 6px 14px; font-size: 0.8rem; border-radius: 6px; }
+
+    /* ── Status dot ── */
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: var(--red);
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    .dot.connected { background: var(--green); }
+    .dot.connecting { background: var(--yellow); animation: blink 0.8s infinite; }
+    @keyframes blink { 50% { opacity: 0.3; } }
+    #status-text { font-size: 0.85rem; color: var(--muted); }
+
+    /* ── Controls row ── */
+    .controls {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    /* ── Peer list ── */
+    #peers-list { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+    #peers-list li {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 14px;
+      background: var(--bg);
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .peer-avatar {
+      width: 36px; height: 36px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 0.9rem; flex-shrink: 0;
+    }
+    .peer-info { flex: 1; }
+    .peer-name { font-size: 0.9rem; font-weight: 600; }
+    .peer-vol  { font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
+    .peer-bar-wrap {
+      width: 80px; height: 6px;
+      background: var(--border);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .peer-bar {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--green));
+      border-radius: 3px;
+      transition: width 0.4s ease;
+      width: 0%;
+    }
+
+    /* ── Empty state ── */
+    .empty { color: var(--muted); font-size: 0.85rem; text-align: center; padding: 20px 0; }
+
+    /* ── Hidden ── */
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>🎙️ ProximityVoice</h1>
+    <p>Minecraft Bedrock Proximity Voice Chat</p>
+  </header>
+
+  <!-- Connect card -->
+  <div class="card" id="connect-card">
+    <h2>Connect</h2>
+    <label>Server URL</label>
+    <input type="text" id="server-url" placeholder="wss://your-app.onrender.com" />
+    <label>Your Minecraft Gamertag</label>
+    <input type="text" id="gamertag" placeholder="Steve" />
+    <button class="btn btn-primary" id="btn-join">🎮 Join Voice</button>
+  </div>
+
+  <!-- Voice card (hidden until joined) -->
+  <div class="card hidden" id="voice-card">
+    <h2>Voice</h2>
+
+    <div class="status-row">
+      <div class="dot" id="status-dot"></div>
+      <span id="status-text">Disconnected</span>
+    </div>
+
+    <div class="controls">
+      <button class="btn btn-mute btn-sm" id="btn-mute">🎤 Mute</button>
+      <button class="btn btn-danger btn-sm" id="btn-leave">⏏ Leave</button>
+    </div>
+  </div>
+
+  <!-- Nearby players card -->
+  <div class="card hidden" id="peers-card">
+    <h2>Nearby Players</h2>
+    <ul id="peers-list">
+      <li class="empty" id="no-peers">No players nearby</li>
+    </ul>
+  </div>
+
+  <!-- mediasoup-client from CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mediasoup-client/3.6.90/mediasoup-client.min.js"></script>
+
+  <script>
+  (() => {
+    // ──────────────────────────────────────────────────────
+    // State
+    // ──────────────────────────────────────────────────────
+    let ws = null;
+    let device = null;
+    let sendTransport = null;
+    let recvTransport = null;
+    let producer = null;
+    let localStream = null;
+    let myGamertag = '';
+    let isMuted = false;
+
+    // speakerTag → { consumer, audioEl, gainNode, volumeValue }
+    const consumers = new Map();
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    // ──────────────────────────────────────────────────────
+    // UI refs
+    // ──────────────────────────────────────────────────────
+    const $serverUrl   = document.getElementById('server-url');
+    const $gamertag    = document.getElementById('gamertag');
+    const $btnJoin     = document.getElementById('btn-join');
+    const $connectCard = document.getElementById('connect-card');
+    const $voiceCard   = document.getElementById('voice-card');
+    const $peersCard   = document.getElementById('peers-card');
+    const $statusDot   = document.getElementById('status-dot');
+    const $statusText  = document.getElementById('status-text');
+    const $btnMute     = document.getElementById('btn-mute');
+    const $btnLeave    = document.getElementById('btn-leave');
+    const $peersList   = document.getElementById('peers-list');
+    const $noPeers     = document.getElementById('no-peers');
+
+    // ──────────────────────────────────────────────────────
+    // Status helpers
+    // ──────────────────────────────────────────────────────
+    function setStatus(state, text) {
+      $statusDot.className = 'dot ' + state;
+      $statusText.textContent = text;
+    }
+
+    // ──────────────────────────────────────────────────────
+    // Peer list UI
+    // ──────────────────────────────────────────────────────
+    function renderPeer(tag, volume = 0) {
+      let li = document.getElementById('peer-' + tag);
+      if (!li) {
+        li = document.createElement('li');
+        li.id = 'peer-' + tag;
+        li.innerHTML = `
+          <div class="peer-avatar">${tag[0].toUpperCase()}</div>
+          <div class="peer-info">
+            <div class="peer-name">${tag}</div>
+            <div class="peer-vol" id="vol-text-${tag}">Out of range</div>
+          </div>
+          <div class="peer-bar-wrap">
+            <div class="peer-bar" id="vol-bar-${tag}"></div>
+          </div>`;
+        $peersList.appendChild(li);
+      }
+      updatePeerVolume(tag, volume);
+      $noPeers.classList.add('hidden');
+    }
+
+    function updatePeerVolume(tag, volume) {
+      const bar = document.getElementById('vol-bar-' + tag);
+      const txt = document.getElementById('vol-text-' + tag);
+      if (!bar || !txt) return;
+      bar.style.width = Math.round(volume * 100) + '%';
+      txt.textContent = volume > 0
+        ? `Volume: ${Math.round(volume * 100)}%`
+        : 'Out of range';
+    }
+
+    function removePeer(tag) {
+      const el = document.getElementById('peer-' + tag);
+      if (el) el.remove();
+      if ($peersList.querySelectorAll('li:not(.empty)').length === 0) {
+        $noPeers.classList.remove('hidden');
+      }
+    }
+
+    // ──────────────────────────────────────────────────────
+    // WebSocket + mediasoup
+    // ──────────────────────────────────────────────────────
+    async function connect() {
+      const rawUrl = $serverUrl.value.trim();
+      myGamertag = $gamertag.value.trim();
+      if (!rawUrl || !myGamertag) {
+        alert('Please fill in Server URL and Gamertag');
+        return;
+      }
+
+      // แปลง http → ws
+      const wsUrl = rawUrl.replace(/^http/, 'ws');
+
+      setStatus('connecting', 'Connecting…');
+      $btnJoin.disabled = true;
+
+      // Get mic
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      } catch (err) {
+        alert('Microphone access denied: ' + err.message);
+        $btnJoin.disabled = false;
+        setStatus('', 'Mic denied');
+        return;
+      }
+
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        setStatus('connecting', 'Requesting RTP caps…');
+        // Load mediasoup device กับ RTP caps ของ server
+        send({ type: 'join', gamertag: myGamertag });
+      };
+
+      ws.onmessage = async (e) => {
+        const msg = JSON.parse(e.data);
+        await handleMsg(msg);
+      };
+
+      ws.onclose = () => {
+        setStatus('', 'Disconnected');
+        cleanup();
+        showConnect();
+      };
+
+      ws.onerror = () => {
+        setStatus('', 'Connection error');
+      };
+    }
+
+    // ──────────────────────────────────────────────────────
+    // Message Handler
+    // ──────────────────────────────────────────────────────
+    async function handleMsg(msg) {
+      switch (msg.type) {
+
+        // ── Server ส่ง RTP caps + รายชื่อ peers ──────────
+        case 'joined': {
+          device = new mediasoupClient.Device();
+          await device.load({ routerRtpCapabilities: msg.rtpCapabilities });
+
+          // สร้าง send transport
+          send({ type: 'create-transport', direction: 'send' });
+          // สร้าง recv transport
+          send({ type: 'create-transport', direction: 'recv' });
+
+          setStatus('connecting', 'Setting up transports…');
+
+          // แสดง peers ที่มีอยู่แล้ว
+          for (const tag of (msg.peers || [])) {
+            renderPeer(tag, 0);
+          }
+          break;
+        }
+
+        // ── Transport สร้างแล้ว ────────────────────────────
+        case 'transport-created': {
+          const { direction, params } = msg;
+
+          if (direction === 'send') {
+            sendTransport = device.createSendTransport(params);
+            sendTransport.on('connect', ({ dtlsParameters }, cb) => {
+              send({ type: 'connect-transport', direction: 'send', dtlsParameters });
+              cb();
+            });
+            sendTransport.on('produce', async ({ kind, rtpParameters }, cb) => {
+              send({ type: 'produce', rtpParameters });
+              // รอ producerId
+              const onMsg = (e) => {
+                const m = JSON.parse(e.data);
+                if (m.type === 'produced') {
+                  ws.removeEventListener('message', onMsg);
+                  cb({ id: m.producerId });
+                }
+              };
+              ws.addEventListener('message', onMsg);
+            });
+
+            // เริ่ม produce ทันที
+            const track = localStream.getAudioTracks()[0];
+            producer = await sendTransport.produce({ track });
+
+          } else {
+            recvTransport = device.createRecvTransport(params);
+            recvTransport.on('connect', ({ dtlsParameters }, cb) => {
+              send({ type: 'connect-transport', direction: 'recv', dtlsParameters });
+              cb();
+            });
+
+            setStatus('connected', `Connected as ${myGamertag}`);
+            showVoice();
+          }
+          break;
+        }
+
+        // ── มีคนใหม่ produce → ขอ consume ─────────────────
+        case 'new-producer': {
+          const { gamertag } = msg;
+          renderPeer(gamertag, 0);
+          await consumePeer(gamertag);
+          break;
+        }
+
+        // ── Server ส่ง consumer params กลับมา ─────────────
+        case 'consumed': {
+          const { speakerGamertag, params } = msg;
+          const consumer = await recvTransport.consume(params);
+          const mediaStream = new MediaStream([consumer.track]);
+
+          // สร้าง GainNode เพื่อปรับ volume
+          const source = audioCtx.createMediaStreamSource(mediaStream);
+          const gainNode = audioCtx.createGain();
+          gainNode.gain.value = 0; // เริ่มต้น 0 รอ proximity update
+          source.connect(gainNode);
+          gainNode.connect(audioCtx.destination);
+
+          // เก็บไว้ใน map
+          consumers.set(speakerGamertag, { consumer, gainNode, volume: 0 });
+          break;
+        }
+
+        // ── Proximity update จาก server ───────────────────
+        case 'proximity-update': {
+          const { volumes } = msg; // { "PlayerA": 0.8, "PlayerB": 0.0 }
+
+          for (const [tag, vol] of Object.entries(volumes)) {
+            const entry = consumers.get(tag);
+            if (entry) {
+              entry.gainNode.gain.setTargetAtTime(vol, audioCtx.currentTime, 0.05);
+              entry.volume = vol;
+            }
+            renderPeer(tag, vol);
+          }
+
+          // Players ที่ไม่อยู่ใน update = out of range → volume 0
+          for (const [tag, entry] of consumers.entries()) {
+            if (!(tag in volumes)) {
+              entry.gainNode.gain.setTargetAtTime(0, audioCtx.currentTime, 0.05);
+              updatePeerVolume(tag, 0);
+            }
+          }
+          break;
+        }
+
+        // ── Peer ออกจากห้อง ────────────────────────────────
+        case 'peer-left': {
+          const { gamertag } = msg;
+          const entry = consumers.get(gamertag);
+          if (entry) {
+            entry.consumer.close();
+            consumers.delete(gamertag);
+          }
+          removePeer(gamertag);
+          break;
+        }
+
+        case 'error':
+          console.error('[Server error]', msg.message);
+          break;
+      }
+    }
+
+    // ──────────────────────────────────────────────────────
+    // Consume peer helper
+    // ──────────────────────────────────────────────────────
+    async function consumePeer(speakerGamertag) {
+      if (!device || !recvTransport) return;
+      send({
+        type: 'consume',
+        speakerGamertag,
+        rtpCapabilities: device.rtpCapabilities,
+      });
+    }
+
+    // ──────────────────────────────────────────────────────
+    // Send helper
+    // ──────────────────────────────────────────────────────
+    function send(data) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(data));
+      }
+    }
+
+    // ──────────────────────────────────────────────────────
+    // Mute toggle
+    // ──────────────────────────────────────────────────────
+    function toggleMute() {
+      isMuted = !isMuted;
+      if (producer) {
+        isMuted ? producer.pause() : producer.resume();
+      }
+      $btnMute.textContent = isMuted ? '🔇 Unmute' : '🎤 Mute';
+    }
+
+    // ──────────────────────────────────────────────────────
+    // Cleanup + Leave
+    // ──────────────────────────────────────────────────────
+    function cleanup() {
+      if (producer) { producer.close(); producer = null; }
+      if (sendTransport) { sendTransport.close(); sendTransport = null; }
+      if (recvTransport) { recvTransport.close(); recvTransport = null; }
+      for (const entry of consumers.values()) entry.consumer.close();
+      consumers.clear();
+      if (localStream) {
+        localStream.getTracks().forEach(t => t.stop());
+        localStream = null;
+      }
+      $peersList.querySelectorAll('li:not(.empty)').forEach(el => el.remove());
+      $noPeers.classList.remove('hidden');
+    }
+
+    function leave() {
+      if (ws) { ws.close(); ws = null; }
+      cleanup();
+      showConnect();
+    }
+
+    // ──────────────────────────────────────────────────────
+    // Show/hide views
+    // ──────────────────────────────────────────────────────
+    function showVoice() {
+      $connectCard.classList.add('hidden');
+      $voiceCard.classList.remove('hidden');
+      $peersCard.classList.remove('hidden');
+    }
+
+    function showConnect() {
+      $connectCard.classList.remove('hidden');
+      $voiceCard.classList.add('hidden');
+      $peersCard.classList.add('hidden');
+      $btnJoin.disabled = false;
+      isMuted = false;
+      $btnMute.textContent = '🎤 Mute';
+    }
+
+    // ──────────────────────────────────────────────────────
+    // Events
+    // ──────────────────────────────────────────────────────
+    $btnJoin.addEventListener('click', connect);
+    $btnMute.addEventListener('click', toggleMute);
+    $btnLeave.addEventListener('click', leave);
+
+    // Resume AudioContext on first interaction (browser policy)
+    document.addEventListener('click', () => {
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+    }, { once: true });
+  })();
+  </script>
+
+</body>
+</html>
